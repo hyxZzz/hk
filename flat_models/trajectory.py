@@ -73,6 +73,7 @@ class Missiles:
         self.Pitch, self.Heading = Pitch, Heading  # 导弹发射的初始俯仰角和偏航角
 
         self.attacking = True  # 导弹是否还在飞行
+        self.target_plane_id: int = -1
 
         # 导弹自身参数
         self.g = g  # 重力加速度
@@ -590,6 +591,7 @@ class Interceptor:
 
         self.T_i = - 1  # 拦截弹锁定的来袭导弹编号
         self.attacking = -1  # 拦截弹是否就绪或飞行或打中，初始-1为就绪状态
+        self.owner_plane_id: int = -1
 
         # 拦截弹自身参数
         self.mg = mg  # 重力加速度
