@@ -110,7 +110,12 @@ def evaluate_checkpoint(
 ) -> float:
     """Evaluate ``checkpoint_path`` and return the intercept success rate."""
 
-    env, _, _ = init_env(num_missiles=config.num_missiles, StepNum=config.step_num)
+    env, _, _ = init_env(
+        num_missiles=config.num_missiles,
+        StepNum=config.step_num,
+        interceptor_num=6,
+        num_planes=2,
+    )
     action_size = env._get_actSpace()
     state_size = env._getNewStateSpace()[0]
     agent = build_agent(state_size, action_size, config)
@@ -120,8 +125,8 @@ def evaluate_checkpoint(
     for _ in range(config.episodes):
         state, done_flag, _ = env.reset()
         while True:
-            action = select_action(agent, state)
-            state, _, done_flag, _ = env.step(action)
+            actions = {plane_id: select_action(agent, plane_state) for plane_id, plane_state in state.items()}
+            state, _, done_flag, _ = env.step(actions)
             if done_flag != -1:
                 if done_flag == 2:
                     success_count += 1
