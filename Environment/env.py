@@ -27,11 +27,11 @@ Gostep = 1
 
 INTERCEPT_SUCCESS_DISTANCE = 20.0
 MISSILE_HIT_DISTANCE = 20.0
-SPARSE_REWARD_SCALE = 0.75
+SPARSE_REWARD_SCALE = 5.0
 DANGER_DISTANCE = 3000.0
 LanchGap = 70
 ERRACTIONSCALE = 2
-DANGERSCALE = 3
+DANGERSCALE = 1.5
 CURIOSITYSCALE = 0.5
 SAFE_DISTANCE_THRESHOLD = 8000.0
 SOFT_CONSTRAINT_DEFAULT = 0.05
@@ -39,7 +39,12 @@ COOPERATIVE_OWNER_REWARD = 2.5
 COOPERATIVE_TARGET_REWARD = 2.5
 UNPROTECTED_PENALTY = 0.3
 REPEATED_LOCK_PENALTY = 0.1
-TIMEOUT_REWARD = 0.25
+TIMEOUT_REWARD = -0.25
+THREAT_DISENGAGE_REWARD = 2.0
+APPROACH_REWARD_SCALE = 0.0005
+INTERCEPT_APPROACH_SCALE = 0.002
+LOCK_SUPPORT_REWARD = 0.05
+LOCK_MAINTENANCE_REWARD = 0.03
 
 
 @dataclass
@@ -176,6 +181,9 @@ class ManeuverEnv:
         self.At_1 = np.full((self.num_planes,), -1, dtype=np.int32)
 
         self.last_missile_distances = np.zeros((self.num_planes, self.missileNum), dtype=np.float32)
+        self.prev_missile_distances = np.zeros((self.num_planes, self.missileNum), dtype=np.float32)
+        self.last_interceptor_distances = np.zeros((self.total_interceptors,), dtype=np.float32)
+        self.prev_interceptor_distances = np.zeros((self.total_interceptors,), dtype=np.float32)
         self._refresh_all_observations()
 
         self.soft_penalty_accumulator = np.zeros((self.num_planes,), dtype=np.float32)
@@ -363,6 +371,8 @@ class ManeuverEnv:
                     [missile.X, missile.Y, missile.Z, missile.Pitch, missile.Heading, -1.0, -1.0],
                     dtype=np.float32,
                 )
+                self.last_missile_distances[:, missile_idx] = 0.0
+                self.prev_missile_distances[:, missile_idx] = 0.0
                 continue
 
             target_plane = self.missile_targets[missile_idx]
@@ -373,6 +383,8 @@ class ManeuverEnv:
                     [missile.X, missile.Y, missile.Z, missile.Pitch, missile.Heading, -1.0, -1.0],
                     dtype=np.float32,
                 )
+                self.last_missile_distances[:, missile_idx] = 0.0
+                self.prev_missile_distances[:, missile_idx] = 0.0
                 continue
 
             plane = self.aircrafts[target_plane]
@@ -386,10 +398,11 @@ class ManeuverEnv:
 
             dist = CalDistance(plane_pos, missile_pos)
             previous = self.last_missile_distances[target_plane, missile_idx]
-            if previous <= 0:
-                self.last_missile_distances[target_plane, missile_idx] = dist
+            if previous > 0:
+                self.prev_missile_distances[target_plane, missile_idx] = previous
             else:
-                self.last_missile_distances[target_plane, missile_idx] = dist
+                self.prev_missile_distances[target_plane, missile_idx] = dist
+            self.last_missile_distances[target_plane, missile_idx] = dist
 
             if dist < min_threat_distance:
                 min_threat_distance = dist
@@ -401,6 +414,8 @@ class ManeuverEnv:
                 missile.attacking = False
                 missile.target_plane_id = -1
                 self.missile_targets[missile_idx] = -1
+                self.last_missile_distances[:, missile_idx] = 0.0
+                self.prev_missile_distances[:, missile_idx] = 0.0
                 self.episode_metrics["plane_destroyed"][target_plane] = True
                 self.episode_metrics["plane_survival_time"][target_plane] = float(self.t)
 
@@ -420,6 +435,8 @@ class ManeuverEnv:
                     [interceptor.X_i, interceptor.Y_i, interceptor.Z_i, interceptor.Pitch_i, interceptor.Heading_i, -1.0, float(owner), -1.0],
                     dtype=np.float32,
                 )
+                self.last_interceptor_distances[interceptor_idx] = 0.0
+                self.prev_interceptor_distances[interceptor_idx] = 0.0
                 continue
 
             if interceptor.attacking == 1:
@@ -427,6 +444,8 @@ class ManeuverEnv:
                     [interceptor.X_i, interceptor.Y_i, interceptor.Z_i, interceptor.Pitch_i, interceptor.Heading_i, 1.0, float(owner), float(target_idx)],
                     dtype=np.float32,
                 )
+                self.last_interceptor_distances[interceptor_idx] = 0.0
+                self.prev_interceptor_distances[interceptor_idx] = 0.0
                 continue
 
             if target_idx < 0 or target_idx >= self.missileNum:
@@ -435,6 +454,8 @@ class ManeuverEnv:
                     [interceptor.X_i, interceptor.Y_i, interceptor.Z_i, interceptor.Pitch_i, interceptor.Heading_i, 1.0, float(owner), -1.0],
                     dtype=np.float32,
                 )
+                self.last_interceptor_distances[interceptor_idx] = 0.0
+                self.prev_interceptor_distances[interceptor_idx] = 0.0
                 continue
 
             missile = self.missileList[target_idx]
@@ -444,6 +465,8 @@ class ManeuverEnv:
                     [interceptor.X_i, interceptor.Y_i, interceptor.Z_i, interceptor.Pitch_i, interceptor.Heading_i, 1.0, float(owner), float(target_idx)],
                     dtype=np.float32,
                 )
+                self.last_interceptor_distances[interceptor_idx] = 0.0
+                self.prev_interceptor_distances[interceptor_idx] = 0.0
                 continue
 
             missile_pos = [missile.X, missile.Y, missile.Z]
@@ -459,6 +482,12 @@ class ManeuverEnv:
             )
 
             dist = CalDistance(interceptor_pos, missile_pos)
+            previous_dist = self.last_interceptor_distances[interceptor_idx]
+            if previous_dist > 0:
+                self.prev_interceptor_distances[interceptor_idx] = previous_dist
+            else:
+                self.prev_interceptor_distances[interceptor_idx] = dist
+            self.last_interceptor_distances[interceptor_idx] = dist
             if dist < INTERCEPT_SUCCESS_DISTANCE:
                 lock_total, lock_by_owner = self._count_active_locks_for_missile(target_idx)
                 target_plane_cached = self._cached_target_plane(target_idx)
@@ -467,6 +496,10 @@ class ManeuverEnv:
                 interceptor.attacking = 1
                 self.interceptor_targets[interceptor_idx] = -1
                 self.missile_targets[target_idx] = -1
+                self.last_missile_distances[:, target_idx] = 0.0
+                self.prev_missile_distances[:, target_idx] = 0.0
+                self.last_interceptor_distances[interceptor_idx] = 0.0
+                self.prev_interceptor_distances[interceptor_idx] = 0.0
                 intercept_event = InterceptEvent(
                     owner,
                     target_idx,
@@ -515,6 +548,22 @@ class ManeuverEnv:
     def _compute_rewards(self, intercept_events: Sequence[InterceptEvent]):
         rewards = {plane_id: 0.0 for plane_id in range(self.num_planes)}
 
+        lock_counts_per_plane = [0 for _ in range(self.num_planes)]
+        for idx, target_idx in enumerate(self.interceptor_targets):
+            if target_idx < 0 or target_idx >= self.missileNum:
+                continue
+            interceptor = self.interceptorList[idx]
+            if interceptor.attacking != 0:
+                continue
+            owner = self.interceptor_owners[idx]
+            lock_counts_per_plane[owner] += 1
+            prev_dist = float(self.prev_interceptor_distances[idx])
+            curr_dist = float(self.last_interceptor_distances[idx])
+            if prev_dist > 0 and curr_dist > 0:
+                delta = prev_dist - curr_dist
+                if delta != 0:
+                    rewards[owner] += INTERCEPT_APPROACH_SCALE * delta
+
         for plane_id, plane in enumerate(self.aircrafts):
             if not self.aircraft_alive[plane_id]:
                 rewards[plane_id] -= 10.0
@@ -531,17 +580,27 @@ class ManeuverEnv:
                 dist = CalDistance(plane_pos, missile_pos)
 
                 if target_plane == plane_id:
-                    prev = self.last_missile_distances[plane_id, missile_idx]
+                    prev = float(self.prev_missile_distances[plane_id, missile_idx])
                     if prev > 0:
-                        delta = dist - prev
-                        rewards[plane_id] += 0.0005 * delta
+                        delta = prev - dist
+                        if delta != 0:
+                            rewards[plane_id] += APPROACH_REWARD_SCALE * delta
+                    danger_scale = DANGERSCALE
+                    lock_count = self.missile_lock_counts[missile_idx]
+                    if lock_count > 0:
+                        danger_scale *= 0.5
+                        rewards[plane_id] += LOCK_SUPPORT_REWARD * lock_count
                     if dist < DANGER_DISTANCE:
-                        rewards[plane_id] -= DANGERSCALE * (1.0 - dist / DANGER_DISTANCE)
-                    if self.missile_lock_counts[missile_idx] <= 0:
+                        rewards[plane_id] -= danger_scale * (1.0 - dist / DANGER_DISTANCE)
+                    if lock_count <= 0:
                         rewards[plane_id] -= UNPROTECTED_PENALTY
                 else:
                     if dist < DANGER_DISTANCE:
                         rewards[plane_id] -= 0.1 * (1.0 - dist / DANGER_DISTANCE)
+
+        for plane_id, lock_count in enumerate(lock_counts_per_plane):
+            if lock_count > 0 and self.aircraft_alive[plane_id]:
+                rewards[plane_id] += LOCK_MAINTENANCE_REWARD * lock_count
 
         for event in intercept_events:
             owner = event.owner_plane
@@ -571,8 +630,12 @@ class ManeuverEnv:
                     rewards[owner_id] -= REPEATED_LOCK_PENALTY * (count - 1)
 
         if self.escapeFlag == 2:
+            if self.info == "Intercept Success":
+                bonus = SPARSE_REWARD_SCALE
+            else:
+                bonus = THREAT_DISENGAGE_REWARD
             for plane_id in rewards:
-                rewards[plane_id] += SPARSE_REWARD_SCALE
+                rewards[plane_id] += bonus
         elif self.escapeFlag == 1:
             for plane_id in rewards:
                 rewards[plane_id] += TIMEOUT_REWARD

@@ -232,7 +232,7 @@ def main():
     parser.add_argument("--memory_warmup_size", type=int, default=4000, help="Warmup size of replay memory")
     parser.add_argument("--learn_freq", type=int, default=20, help="Frequency of learning")
     parser.add_argument("--batch_size", type=int, default=384, help="Batch size for training")
-    parser.add_argument("--learning_rate", type=float, default=5e-4, help="Learning rate for training")
+    parser.add_argument("--learning_rate", type=float, default=3e-4, help="Learning rate for training")
     parser.add_argument("--gamma", type=float, default=0.993, help="Discount factor")
     parser.add_argument(
         "--target_update_freq",
@@ -322,6 +322,7 @@ def main():
         e_greed=0.85,
         e_greed_decrement=5e-7,
         update_target_steps=TARGET_UPDATE_FREQ,
+        target_tau=0.05,
     )
     agents: Dict[int, MyDQNAgent] = {agent_id: shared_agent for agent_id in range(num_planes)}
 

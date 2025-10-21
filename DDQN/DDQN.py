@@ -8,7 +8,7 @@ class Double_DQN(nn.Module):
     def __init__(self, state_size: int, action_size: int, hidden_sizes: Optional[Sequence[int]] = None):
         super().__init__()
         if hidden_sizes is None:
-            hidden_sizes = (512, 512)
+            hidden_sizes = (256, 256)
 
         layers = []
         in_features = state_size
@@ -19,7 +19,7 @@ class Double_DQN(nn.Module):
 
         self.feature_extractor = nn.Sequential(*layers)
 
-        value_hidden = max(256, in_features // 2)
+        value_hidden = max(128, in_features // 2)
         self.value_stream = nn.Sequential(
             nn.Linear(in_features, value_hidden),
             nn.ReLU(),

@@ -12,12 +12,14 @@ from torch.nn.utils import clip_grad_norm_
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 # 更新目标网络的操作函数，在MyDQNAgent.learn()函数中调用
-def soft_update(target, source, tau=0):
-    # zip() 函数用于将可迭代的对象作为参数，将对象中对应的元素打包成一个个元组，然后返回由这些元组组成的列表。
-    # print(target.parameters())
-    target.load_state_dict(source.state_dict())
-    # print(target.parameters())
-        # target_param.set_para(target_param*tau+param*(1.0-tau))
+def soft_update(target: nn.Module, source: nn.Module, tau: float) -> None:
+    if tau >= 1.0:
+        target.load_state_dict(source.state_dict())
+        return
+
+    for target_param, param in zip(target.parameters(), source.parameters()):
+        target_param.data.mul_(1.0 - tau)
+        target_param.data.add_(tau * param.data)
 
 
 class MyDQNAgent:
@@ -32,6 +34,7 @@ class MyDQNAgent:
         e_greed_decrement=0,
         update_target_steps=15,
         max_grad_norm: float = 10.0,
+        target_tau: float = 1.0,
     ):
 
         self.action_size = action_size
@@ -46,9 +49,10 @@ class MyDQNAgent:
         self.loss_fn = nn.SmoothL1Loss(reduction="none")
         self.optimizer = optim.Adam(lr=lr, params=self.model.parameters())
         self.max_grad_norm = max_grad_norm
+        self.target_tau = float(target_tau)
 
     def _update_target_model(self):
-        self.target_model.load_state_dict(self.model.state_dict())
+        soft_update(self.target_model, self.model, self.target_tau)
 
     # 使用行为策略生成动作
     def sample(self, state, valid_actions: Optional[np.ndarray] = None):
@@ -66,13 +70,7 @@ class MyDQNAgent:
             else:
                 act = int(np.random.choice(valid_indices))
         else:
-            if np.random.random() < 0.01:
-                if valid_indices is None:
-                    act = int(np.random.randint(self.action_size))
-                else:
-                    act = int(np.random.choice(valid_indices))
-            else:
-                act = self.predict(state, valid_actions)
+            act = self.predict(state, valid_actions)
 
         # 动态更改e_greed,但不小于0.1
         self.e_greed = max(0.1, self.e_greed - self.e_greed_decrement)
