@@ -15,16 +15,7 @@ def ComputeHeading(TargetPos, SelfPos):
 
     x = a_x - m_x
     z = a_z - m_z
-    Heading = m.atan(abs(z) / abs(x + 10e-8))
-
-    if (x >= 0 and z > 0):
-        Heading = -Heading
-
-    elif (x < 0 and z <= 0):
-        Heading = m.pi - Heading
-
-    elif (x < 0 and z > 0):
-        Heading = Heading - m.pi
+    Heading = m.atan2(-z, x)
 
     return Heading  # 模型的xz坐标系，当x轴正方向向上↑👆的时候z轴正方向向左←👈
 

@@ -1,10 +1,14 @@
 """Utilities for summarising reward and action statistics from logged rollouts."""
 from __future__ import annotations
 
+import argparse
+import csv
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
+
+import matplotlib.pyplot as plt
 
 
 @dataclass
@@ -31,6 +35,18 @@ class RewardActionStats:
             entries.append((action, mean_reward, self.action_positive_ratio[action], self.action_counts[action]))
         entries.sort(key=lambda item: item[1])
         return entries[:limit]
+
+
+@dataclass
+class EvaluationHistory:
+    episodes: List[int]
+    success_rates: List[float]
+    mean_interceptor_launches: List[float]
+    illegal_launch_rates: List[float]
+    mean_overkills: List[float]
+    mean_cooperative_intercepts: List[float]
+    mean_unprotected_rates: List[float]
+    mean_survival_times: List[float]
 
 
 def _parse_values(path: Path, prefix: str) -> List[float]:
@@ -119,11 +135,104 @@ def load_stats(action_log: Path, reward_log: Path) -> RewardActionStats:
     )
 
 
+def load_evaluation_history(csv_path: Path) -> EvaluationHistory:
+    episodes: List[int] = []
+    success_rates: List[float] = []
+    mean_launches: List[float] = []
+    illegal_rates: List[float] = []
+    mean_overkills: List[float] = []
+    mean_cooperative: List[float] = []
+    mean_unprotected: List[float] = []
+    mean_survival: List[float] = []
+
+    with open(csv_path, "r", encoding="utf-8", newline="") as csv_file:
+        reader = csv.DictReader(csv_file)
+        for row in reader:
+            episodes.append(int(row["episode"]))
+            success_rates.append(float(row["success_rate"]))
+            mean_launches.append(float(row.get("mean_interceptor_launches", 0.0)))
+            illegal_rates.append(float(row.get("illegal_launch_rate", 0.0)))
+            mean_overkills.append(float(row.get("mean_overkill", 0.0)))
+            mean_cooperative.append(float(row.get("mean_cooperative_intercepts", 0.0)))
+            mean_unprotected.append(float(row.get("mean_unprotected_rate", 0.0)))
+            mean_survival.append(float(row.get("mean_survival_time", 0.0)))
+
+    return EvaluationHistory(
+        episodes=episodes,
+        success_rates=success_rates,
+        mean_interceptor_launches=mean_launches,
+        illegal_launch_rates=illegal_rates,
+        mean_overkills=mean_overkills,
+        mean_cooperative_intercepts=mean_cooperative,
+        mean_unprotected_rates=mean_unprotected,
+        mean_survival_times=mean_survival,
+    )
+
+
+def plot_evaluation_history(history: EvaluationHistory, output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _plot(series: List[float], ylabel: str, filename: str) -> None:
+        plt.figure()
+        plt.plot(history.episodes, series, marker="o")
+        plt.xlabel("Episode")
+        plt.ylabel(ylabel)
+        plt.grid(True, linestyle="--", alpha=0.5)
+        plt.tight_layout()
+        plt.savefig(output_dir / filename)
+        plt.close()
+
+    _plot(history.success_rates, "Success Rate", "success_rate.png")
+    _plot(
+        history.mean_interceptor_launches,
+        "Mean Interceptor Launches",
+        "mean_interceptor_launches.png",
+    )
+    _plot(history.illegal_launch_rates, "Illegal Launch Rate", "illegal_launch_rate.png")
+    _plot(history.mean_overkills, "Mean Overkill", "mean_overkill.png")
+    _plot(
+        history.mean_cooperative_intercepts,
+        "Mean Cooperative Intercepts",
+        "mean_cooperative_intercepts.png",
+    )
+    _plot(history.mean_unprotected_rates, "Mean Unprotected Rate", "mean_unprotected_rate.png")
+    _plot(history.mean_survival_times, "Mean Survival Time", "mean_survival_time.png")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Analyse reward logs and optional evaluation metrics"
+    )
+    parser.add_argument(
+        "--action-log",
+        type=Path,
+        default=Path("action.txt"),
+        help="Path to the action log file (default: action.txt)",
+    )
+    parser.add_argument(
+        "--reward-log",
+        type=Path,
+        default=Path("reward.txt"),
+        help="Path to the reward log file (default: reward.txt)",
+    )
+    parser.add_argument(
+        "--metrics-csv",
+        type=Path,
+        default=None,
+        help="Optional CSV file containing evaluation metrics (from utils.validate)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("diagnostics"),
+        help="Directory where evaluation plots will be saved",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
-    base_dir = Path.cwd()
-    action_log = base_dir / "action.txt"
-    reward_log = base_dir / "reward.txt"
-    stats = load_stats(action_log, reward_log)
+    args = parse_args()
+    stats = load_stats(args.action_log, args.reward_log)
 
     print(f"Total transitions: {stats.total_steps}")
     print(
@@ -150,6 +259,11 @@ def main() -> None:
             f"  action {action:>2}: count={count:>6}, positive_ratio={ratio:>5.3f}, "
             f"mean_reward={mean_reward:>7.3f}"
         )
+
+    if args.metrics_csv is not None and args.metrics_csv.exists():
+        history = load_evaluation_history(args.metrics_csv)
+        plot_evaluation_history(history, args.output_dir)
+        print(f"Evaluation plots saved to {args.output_dir.resolve()}")
 
 
 if __name__ == "__main__":

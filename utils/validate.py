@@ -16,11 +16,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, Iterable, List, Mapping, MutableMapping, Sequence, Tuple
 
+import numpy as np
 import torch
 from tensorboardX import SummaryWriter
 
 from DDQN.DDQN import Double_DQN
 from DDQN.DQNAgent import MyDQNAgent, device as agent_device
+from Environment.env import SOFT_CONSTRAINT_DEFAULT
 from Environment.init_env import init_env
 
 
@@ -35,6 +37,20 @@ class EvaluationConfig:
     step_num: int = 3500
     gamma: float = 0.993
     learning_rate: float = 5e-4
+    soft_penalty_scale: float = SOFT_CONSTRAINT_DEFAULT
+
+
+@dataclass(frozen=True)
+class EvaluationSummary:
+    mean_total_reward: Dict[int, float]
+    success_rate: float
+    mean_interceptor_launches: float
+    illegal_launch_rate: float
+    mean_overkill: float
+    mean_cooperative_intercepts: float
+    mean_unprotected_rate: float
+    mean_survival_time: float
+    survival_time_distribution: List[float]
 
 
 CHECKPOINT_PATTERN = re.compile(r"DDQN_agent(\d+)_episode(\d+)\.pth$")
@@ -113,13 +129,10 @@ def load_checkpoint(agent: MyDQNAgent, checkpoint_path: str) -> None:
     agent.target_model.load_state_dict(agent.model.state_dict())
 
 
-def select_action(agent: MyDQNAgent, state) -> int:
+def select_action(agent: MyDQNAgent, state, valid_actions=None) -> int:
     """Return the greedy action for ``state`` using ``agent``'s policy."""
 
-    state_tensor = torch.tensor(state, dtype=torch.float32, device=agent_device)
-    with torch.no_grad():
-        q_values = agent.model(state_tensor)
-    return int(q_values.argmax())
+    return agent.predict(state, valid_actions)
 
 
 def _validate_checkpoint_mapping(
@@ -138,15 +151,8 @@ def _validate_checkpoint_mapping(
 def evaluate_checkpoint(
     checkpoint_paths: Mapping[int, str],
     config: EvaluationConfig,
-) -> float:
-    """Evaluate ``checkpoint_paths`` and return the intercept success rate.
-
-    Args:
-        checkpoint_paths: Mapping from agent ID to the path of the checkpoint
-            that should be evaluated for that agent.
-        config: Evaluation configuration controlling the environment and agent
-            hyper-parameters.
-    """
+) -> EvaluationSummary:
+    """Evaluate ``checkpoint_paths`` and return aggregate metrics."""
 
     expected_agent_ids = range(config.num_planes)
     _validate_checkpoint_mapping(checkpoint_paths, expected_agent_ids)
@@ -156,6 +162,7 @@ def evaluate_checkpoint(
         StepNum=config.step_num,
         interceptor_num=config.interceptor_num,
         num_planes=config.num_planes,
+        soft_penalty_scale=config.soft_penalty_scale,
     )
     action_size = env._get_actSpace()
     state_size = env._getNewStateSpace()[0]
@@ -166,21 +173,86 @@ def evaluate_checkpoint(
         load_checkpoint(agent, checkpoint_paths[agent_id])
         agents[agent_id] = agent
 
+    total_rewards = {agent_id: [] for agent_id in expected_agent_ids}
     success_count = 0
+    launch_counts: List[int] = []
+    illegal_launches = 0
+    total_launch_attempts = 0
+    intercept_lock_counts: List[int] = []
+    cooperative_counts: List[int] = []
+    unprotected_rates: List[float] = []
+    survival_times: List[float] = []
+
     for _ in range(config.episodes):
         state, done_flag, _ = env.reset()
+        episode_reward = {agent_id: 0.0 for agent_id in expected_agent_ids}
+        episode_info = None
+
         while True:
+            state_masks = {agent_id: env.valid_action_mask(agent_id) for agent_id in expected_agent_ids}
             actions = {
-                agent_id: select_action(agent, state[agent_id])
+                agent_id: select_action(agent, state[agent_id], state_masks[agent_id])
                 for agent_id, agent in agents.items()
             }
-            state, _, done_flag, _ = env.step(actions)
+            state, reward, done_flag, info = env.step(actions)
+            episode_info = info
+            for agent_id in expected_agent_ids:
+                episode_reward[agent_id] += reward.get(agent_id, 0.0)
             if done_flag != -1:
                 if done_flag == 2:
                     success_count += 1
                 break
 
-    return success_count / float(config.episodes)
+        metrics = None
+        if episode_info is not None:
+            metrics = episode_info.get("metrics")
+        if metrics is None:
+            metrics = env.collect_episode_metrics()
+
+        launch_counts.append(int(metrics.get("successful_launches", 0)))
+        total_launch_attempts += int(metrics.get("launch_attempts", 0))
+        illegal_launches += int(metrics.get("invalid_launches", 0))
+        intercept_lock_counts.extend(int(value) for value in metrics.get("intercept_lock_counts", []))
+        cooperative_counts.append(int(metrics.get("cooperative_intercepts", 0)))
+        episode_length = max(1, int(metrics.get("episode_length", 1)))
+        unprotected_rates.append(
+            float(metrics.get("unprotected_threat_steps", 0)) / float(episode_length)
+        )
+        survival_times.extend(float(value) for value in metrics.get("plane_survival_time", []))
+
+        for agent_id in expected_agent_ids:
+            total_rewards[agent_id].append(episode_reward[agent_id])
+
+    success_rate = success_count / float(config.episodes) if config.episodes > 0 else 0.0
+    mean_total_reward = {
+        agent_id: float(np.mean(rewards)) if rewards else 0.0
+        for agent_id, rewards in total_rewards.items()
+    }
+    mean_launches = float(np.mean(launch_counts)) if launch_counts else 0.0
+    illegal_rate = (
+        illegal_launches / float(total_launch_attempts)
+        if total_launch_attempts > 0
+        else 0.0
+    )
+    mean_overkill = float(np.mean(intercept_lock_counts)) if intercept_lock_counts else 0.0
+    mean_cooperative = float(np.mean(cooperative_counts)) if cooperative_counts else 0.0
+    mean_unprotected = float(np.mean(unprotected_rates)) if unprotected_rates else 0.0
+    survival_time_distribution = [time for time in survival_times if time >= 0.0]
+    mean_survival_time = (
+        float(np.mean(survival_time_distribution)) if survival_time_distribution else 0.0
+    )
+
+    return EvaluationSummary(
+        mean_total_reward=mean_total_reward,
+        success_rate=success_rate,
+        mean_interceptor_launches=mean_launches,
+        illegal_launch_rate=illegal_rate,
+        mean_overkill=mean_overkill,
+        mean_cooperative_intercepts=mean_cooperative,
+        mean_unprotected_rate=mean_unprotected,
+        mean_survival_time=mean_survival_time,
+        survival_time_distribution=survival_time_distribution,
+    )
 
 
 def create_writer() -> Tuple[SummaryWriter, str]:
@@ -194,18 +266,27 @@ def create_writer() -> Tuple[SummaryWriter, str]:
 
 
 def save_csv(
-    log_dir: str, results: Sequence[Tuple[int, Mapping[int, str], float]]
+    log_dir: str, results: Sequence[Tuple[int, Mapping[int, str], EvaluationSummary]]
 ) -> str:
     """Persist evaluation results as a CSV file and return its path."""
 
     csv_path = os.path.join(log_dir, "intercept_success_rates.csv")
+    header = (
+        "episode,checkpoints,success_rate,mean_interceptor_launches,illegal_launch_rate," \
+        "mean_overkill,mean_cooperative_intercepts,mean_unprotected_rate,mean_survival_time\n"
+    )
     with open(csv_path, "w", encoding="utf-8") as csv_file:
-        csv_file.write("episode,checkpoints,success_rate\n")
-        for episode, checkpoints, success_rate in results:
+        csv_file.write(header)
+        for episode, checkpoints, summary in results:
             checkpoint_repr = ";".join(
                 f"agent{agent_id}:{path}" for agent_id, path in sorted(checkpoints.items())
             )
-            csv_file.write(f"{episode},{checkpoint_repr},{success_rate:.6f}\n")
+            csv_file.write(
+                f"{episode},{checkpoint_repr},{summary.success_rate:.6f},"
+                f"{summary.mean_interceptor_launches:.6f},{summary.illegal_launch_rate:.6f},"
+                f"{summary.mean_overkill:.6f},{summary.mean_cooperative_intercepts:.6f},"
+                f"{summary.mean_unprotected_rate:.6f},{summary.mean_survival_time:.6f}\n"
+            )
     return csv_path
 
 
@@ -264,6 +345,12 @@ def parse_args() -> argparse.Namespace:
         default=EvaluationConfig.learning_rate,
         help="Learning rate placeholder required by the agent (default: 0.001)",
     )
+    parser.add_argument(
+        "--soft-penalty-scale",
+        type=float,
+        default=EvaluationConfig.soft_penalty_scale,
+        help="Soft penalty applied when violating launch constraints",
+    )
     return parser.parse_args()
 
 
@@ -277,6 +364,7 @@ def main() -> None:
         step_num=args.step_num,
         gamma=args.gamma,
         learning_rate=args.learning_rate,
+        soft_penalty_scale=args.soft_penalty_scale,
     )
 
     checkpoints = collect_checkpoints(args.model_root, args.start_episode)
@@ -287,23 +375,33 @@ def main() -> None:
         )
 
     writer, log_dir = create_writer()
-    results: List[Tuple[int, Mapping[int, str], float]] = []
+    results: List[Tuple[int, Mapping[int, str], EvaluationSummary]] = []
 
     for episode, checkpoint_paths in checkpoints:
         try:
-            success_rate = evaluate_checkpoint(checkpoint_paths, config)
+            summary = evaluate_checkpoint(checkpoint_paths, config)
         except FileNotFoundError as exc:
             print(
                 f"Skipping episode {episode} due to incomplete checkpoints: {exc}"
             )
             continue
-        writer.add_scalar("intercept_success_rate", success_rate, global_step=episode)
-        results.append((episode, dict(checkpoint_paths), success_rate))
+        writer.add_scalar("intercept_success_rate", summary.success_rate, global_step=episode)
+        writer.add_scalar(
+            "val/mean_interceptor_launches", summary.mean_interceptor_launches, global_step=episode
+        )
+        writer.add_scalar("val/illegal_launch_rate", summary.illegal_launch_rate, global_step=episode)
+        writer.add_scalar("val/mean_overkill", summary.mean_overkill, global_step=episode)
+        writer.add_scalar(
+            "val/mean_cooperative_intercepts", summary.mean_cooperative_intercepts, global_step=episode
+        )
+        writer.add_scalar("val/mean_unprotected_rate", summary.mean_unprotected_rate, global_step=episode)
+        writer.add_scalar("val/mean_survival_time", summary.mean_survival_time, global_step=episode)
+        results.append((episode, dict(checkpoint_paths), summary))
         formatted_paths = ", ".join(
             f"agent{agent_id}:{path}" for agent_id, path in sorted(checkpoint_paths.items())
         )
         print(
-            f"Episode {episode:>4} | success rate: {success_rate:.4f} | {formatted_paths}"
+            f"Episode {episode:>4} | success rate: {summary.success_rate:.4f} | {formatted_paths}"
         )
 
     writer.close()

@@ -1,6 +1,8 @@
 from typing import List, Tuple
 
-from Environment.env import ManeuverEnv
+from typing import List, Tuple
+
+from Environment.env import ManeuverEnv, SOFT_CONSTRAINT_DEFAULT
 from Environment.reset_env import reset_para
 from flat_models.trajectory import Aircraft, Missiles
 
@@ -10,6 +12,7 @@ def init_env(
     StepNum: int = 1000,
     interceptor_num: int = 6,
     num_planes: int = 2,
+    soft_penalty_scale: float = SOFT_CONSTRAINT_DEFAULT,
 ) -> Tuple[ManeuverEnv, List[Aircraft], List[Missiles]]:
     missiles_list, aircraft_list, plane_speeds, _, _, missile_speed = reset_para(
         num_missiles=num_missiles,
@@ -25,6 +28,7 @@ def init_env(
         spaceSize=StepNum,
         missilesSpeed=missile_speed,
         InterceptorNum=interceptor_num,
+        soft_penalty_scale=soft_penalty_scale,
     )
 
     return env, list(aircraft_list), list(missiles_list)
