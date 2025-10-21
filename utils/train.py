@@ -201,12 +201,14 @@ def main():
     validation_config = EvaluationConfig(
         episodes=args.validation_episodes,
         num_missiles=num_missiles,
+        num_planes=num_planes,
+        interceptor_num=interceptors_per_plane,
         step_num=step_num,
         gamma=GAMMA,
         learning_rate=LEARNING_RATE,
     )
     val_writer, val_log_dir = create_validation_writer()
-    validation_results: List[Tuple[int, str, float]] = []
+    validation_results: List[Tuple[int, Dict[int, str], float]] = []
     validation_csv_path = None
 
     max_episode = args.max_episode
@@ -245,15 +247,18 @@ def main():
             )
 
         if episode % 100 == 0:
-            checkpoint_paths = []
+            checkpoint_paths: Dict[int, str] = {}
             for agent_id, agent in agents.items():
-                checkpoint_path = f"./models/DQNmodels/DDQNmodels3_23/DDQN_agent{agent_id}_episode{episode}.pth"
+                checkpoint_path = (
+                    f"./models/DQNmodels/DDQNmodels3_23/"
+                    f"DDQN_agent{agent_id}_episode{episode}.pth"
+                )
                 torch.save({"model": agent.model.state_dict()}, checkpoint_path)
-                checkpoint_paths.append(checkpoint_path)
+                checkpoint_paths[agent_id] = checkpoint_path
 
-            success_rate = evaluate_checkpoint(checkpoint_paths[0], validation_config)
+            success_rate = evaluate_checkpoint(checkpoint_paths, validation_config)
             val_writer.add_scalar("intercept_success_rate", success_rate, episode)
-            validation_results.append((episode, checkpoint_paths[0], success_rate))
+            validation_results.append((episode, dict(checkpoint_paths), success_rate))
             validation_csv_path = save_validation_csv(val_log_dir, validation_results)
             print(
                 "Validation after episode {}: intercept success rate {:.4f}".format(
